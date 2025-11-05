@@ -1,128 +1,20 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
-
-/**
- * @title BlockTrance
- * @dev A decentralized music streaming and royalty distribution platform
- * @notice This contract manages music NFTs, streaming records, and automated royalty payments
- */
-contract BlockTrance {
-    
-    struct Track {
-        uint256 id;
-        string title;
-        address artist;
-        uint256 streamCount;
-        uint256 royaltyPerStream;
-        bool isActive;
-        uint256 timestamp;
-    }
-    
-    struct Artist {
-        address wallet;
-        string name;
-        uint256 totalEarnings;
-        uint256 trackCount;
-        bool isRegistered;
-    }
-    
-    // State variables
+State variables
     mapping(uint256 => Track) public tracks;
     mapping(address => Artist) public artists;
     mapping(address => mapping(uint256 => bool)) public userStreams;
     
     uint256 public trackCounter;
-    uint256 public platformFeePercentage = 5; // 5% platform fee
-    address public platformOwner;
-    uint256 public platformBalance;
-    
-    // Events
+    uint256 public platformFeePercentage = 5; Events
     event ArtistRegistered(address indexed artist, string name);
     event TrackUploaded(uint256 indexed trackId, address indexed artist, string title);
     event TrackStreamed(uint256 indexed trackId, address indexed listener, uint256 royaltyPaid);
     event RoyaltyWithdrawn(address indexed artist, uint256 amount);
     
-    // Modifiers
-    modifier onlyOwner() {
-        require(msg.sender == platformOwner, "Only platform owner can call this");
-        _;
-    }
-    
-    modifier onlyRegisteredArtist() {
-        require(artists[msg.sender].isRegistered, "Artist not registered");
-        _;
-    }
-    
-    constructor() {
-        platformOwner = msg.sender;
-        trackCounter = 0;
-    }
-    
-    /**
-     * @dev Register as an artist on the platform
-     * @param _name Artist name
-     */
-    function registerArtist(string memory _name) external {
-        require(!artists[msg.sender].isRegistered, "Artist already registered");
-        require(bytes(_name).length > 0, "Name cannot be empty");
-        
-        artists[msg.sender] = Artist({
-            wallet: msg.sender,
-            name: _name,
-            totalEarnings: 0,
-            trackCount: 0,
-            isRegistered: true
-        });
-        
-        emit ArtistRegistered(msg.sender, _name);
-    }
-    
-    /**
-     * @dev Upload a new track to the platform
-     * @param _title Track title
-     * @param _royaltyPerStream Royalty amount in wei per stream
-     */
-    function uploadTrack(string memory _title, uint256 _royaltyPerStream) external onlyRegisteredArtist {
-        require(bytes(_title).length > 0, "Title cannot be empty");
-        require(_royaltyPerStream > 0, "Royalty must be greater than 0");
-        
-        trackCounter++;
-        
-        tracks[trackCounter] = Track({
-            id: trackCounter,
-            title: _title,
-            artist: msg.sender,
-            streamCount: 0,
-            royaltyPerStream: _royaltyPerStream,
-            isActive: true,
-            timestamp: block.timestamp
-        });
-        
-        artists[msg.sender].trackCount++;
-        
-        emit TrackUploaded(trackCounter, msg.sender, _title);
-    }
-    
-    /**
-     * @dev Stream a track and pay royalties
-     * @param _trackId ID of the track to stream
-     */
-    function streamTrack(uint256 _trackId) external payable {
-        Track storage track = tracks[_trackId];
-        
-        require(track.isActive, "Track is not active");
-        require(_trackId > 0 && _trackId <= trackCounter, "Invalid track ID");
-        require(msg.value >= track.royaltyPerStream, "Insufficient payment");
-        
-        // Calculate platform fee and artist royalty
+    Calculate platform fee and artist royalty
         uint256 platformFee = (msg.value * platformFeePercentage) / 100;
         uint256 artistRoyalty = msg.value - platformFee;
         
-        // Update balances
-        platformBalance += platformFee;
-        artists[track.artist].totalEarnings += artistRoyalty;
-        
-        // Update stream count
+        Update stream count
         track.streamCount++;
         userStreams[msg.sender][_trackId] = true;
         
@@ -184,3 +76,6 @@ contract BlockTrance {
         platformFeePercentage = _newFee;
     }
 }
+// 
+Updated on 2025-11-05
+// 
