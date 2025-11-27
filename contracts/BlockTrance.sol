@@ -1,81 +1,237 @@
-State variables
-    mapping(uint256 => Track) public tracks;
-    mapping(address => Artist) public artists;
-    mapping(address => mapping(uint256 => bool)) public userStreams;
-    
-    uint256 public trackCounter;
-    uint256 public platformFeePercentage = 5; Events
-    event ArtistRegistered(address indexed artist, string name);
-    event TrackUploaded(uint256 indexed trackId, address indexed artist, string title);
-    event TrackStreamed(uint256 indexed trackId, address indexed listener, uint256 royaltyPaid);
-    event RoyaltyWithdrawn(address indexed artist, uint256 amount);
-    
-    Calculate platform fee and artist royalty
-        uint256 platformFee = (msg.value * platformFeePercentage) / 100;
-        uint256 artistRoyalty = msg.value - platformFee;
-        
-        Update stream count
-        track.streamCount++;
-        userStreams[msg.sender][_trackId] = true;
-        
-        emit TrackStreamed(_trackId, msg.sender, artistRoyalty);
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title BlockTrance
+ * @dev Lightweight ETH escrow and transfer hub with labeled payment flows
+ * @notice Users can create labeled transfers, lock funds, and release or refund via simple rules
+ */
+contract BlockTrance {
+    address public owner;
+    uint256 public nextTransferId;
+
+    enum TransferState {
+        Pending,
+        Released,
+        Refunded,
+        Canceled
     }
-    
-    /**
-     * @dev Withdraw earnings for artists
-     */
-    function withdrawEarnings() external onlyRegisteredArtist {
-        uint256 earnings = artists[msg.sender].totalEarnings;
-        require(earnings > 0, "No earnings to withdraw");
-        
-        artists[msg.sender].totalEarnings = 0;
-        
-        (bool success, ) = payable(msg.sender).call{value: earnings}("");
-        require(success, "Withdrawal failed");
-        
-        emit RoyaltyWithdrawn(msg.sender, earnings);
+
+    struct Transfer {
+        uint256 id;
+        address payer;
+        address payee;
+        uint256 amount;
+        string  label;        // e.g. "milestone-1", "service-fee"
+        uint256 createdAt;
+        TransferState state;
     }
-    
-    /**
-     * @dev Get track details
-     * @param _trackId ID of the track
-     */
-    function getTrack(uint256 _trackId) external view returns (Track memory) {
-        require(_trackId > 0 && _trackId <= trackCounter, "Invalid track ID");
-        return tracks[_trackId];
+
+    // transferId => Transfer
+    mapping(uint256 => Transfer) public transfers;
+
+    // payer => transferIds
+    mapping(address => uint256[]) public transfersByPayer;
+
+    // payee => transferIds
+    mapping(address => uint256[]) public transfersByPayee;
+
+    event TransferCreated(
+        uint256 indexed id,
+        address indexed payer,
+        address indexed payee,
+        uint256 amount,
+        string label,
+        uint256 createdAt
+    );
+
+    event TransferReleased(
+        uint256 indexed id,
+        address indexed payer,
+        address indexed payee,
+        uint256 amount,
+        uint256 timestamp
+    );
+
+    event TransferRefunded(
+        uint256 indexed id,
+        address indexed payer,
+        uint256 amount,
+        uint256 timestamp
+    );
+
+    event TransferCanceled(
+        uint256 indexed id,
+        address indexed payer,
+        uint256 timestamp
+    );
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner");
+        _;
     }
-    
-    /**
-     * @dev Get artist details
-     * @param _artist Address of the artist
-     */
-    function getArtist(address _artist) external view returns (Artist memory) {
-        require(artists[_artist].isRegistered, "Artist not registered");
-        return artists[_artist];
+
+    modifier onlyPayer(uint256 id) {
+        require(transfers[id].payer == msg.sender, "Not payer");
+        _;
     }
-    
-    /**
-     * @dev Platform owner can withdraw platform fees
-     */
-    function withdrawPlatformFees() external onlyOwner {
-        uint256 balance = platformBalance;
-        require(balance > 0, "No platform fees to withdraw");
-        
-        platformBalance = 0;
-        
-        (bool success, ) = payable(platformOwner).call{value: balance}("");
-        require(success, "Withdrawal failed");
+
+    modifier onlyPayee(uint256 id) {
+        require(transfers[id].payee == msg.sender, "Not payee");
+        _;
     }
-    
+
+    modifier transferExists(uint256 id) {
+        require(transfers[id].amount > 0, "Transfer not found");
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+    }
+
     /**
-     * @dev Update platform fee percentage (only owner)
-     * @param _newFee New fee percentage
+     * @dev Create a new escrowed transfer to a payee
+     * @param payee Recipient address
+     * @param label Human-readable label for this transfer
      */
-    function updatePlatformFee(uint256 _newFee) external onlyOwner {
-        require(_newFee <= 20, "Fee cannot exceed 20%");
-        platformFeePercentage = _newFee;
+    function createTransfer(address payee, string calldata label)
+        external
+        payable
+        returns (uint256 id)
+    {
+        require(payee != address(0), "Invalid payee");
+        require(msg.sender != payee, "Self transfer not allowed");
+        require(msg.value > 0, "Amount must be > 0");
+
+        id = nextTransferId;
+        nextTransferId += 1;
+
+        transfers[id] = Transfer({
+            id: id,
+            payer: msg.sender,
+            payee: payee,
+            amount: msg.value,
+            label: label,
+            createdAt: block.timestamp,
+            state: TransferState.Pending
+        });
+
+        transfersByPayer[msg.sender].push(id);
+        transfersByPayee[payee].push(id);
+
+        emit TransferCreated(
+            id,
+            msg.sender,
+            payee,
+            msg.value,
+            label,
+            block.timestamp
+        );
+    }
+
+    /**
+     * @dev Payer releases funds to payee
+     * @param id Transfer identifier
+     */
+    function release(uint256 id)
+        external
+        transferExists(id)
+        onlyPayer(id)
+    {
+        Transfer storage t = transfers[id];
+        require(t.state == TransferState.Pending, "Not pending");
+
+        t.state = TransferState.Released;
+
+        uint256 amount = t.amount;
+        t.amount = 0;
+
+        (bool ok, ) = payable(t.payee).call{value: amount}("");
+        require(ok, "Transfer failed");
+
+        emit TransferReleased(id, t.payer, t.payee, amount, block.timestamp);
+    }
+
+    /**
+     * @dev Payer can refund funds back to themselves (if not yet released)
+     * @param id Transfer identifier
+     */
+    function refund(uint256 id)
+        external
+        transferExists(id)
+        onlyPayer(id)
+    {
+        Transfer storage t = transfers[id];
+        require(t.state == TransferState.Pending, "Not pending");
+
+        t.state = TransferState.Refunded;
+
+        uint256 amount = t.amount;
+        t.amount = 0;
+
+        (bool ok, ) = payable(t.payer).call{value: amount}("");
+        require(ok, "Refund failed");
+
+        emit TransferRefunded(id, t.payer, amount, block.timestamp);
+    }
+
+    /**
+     * @dev Payee can mark transfer as canceled if they choose not to accept,
+     *      payer can later refund or re-route off-chain.
+     *      No funds move here, just state tagging.
+     * @param id Transfer identifier
+     */
+    function cancelByPayee(uint256 id)
+        external
+        transferExists(id)
+        onlyPayee(id)
+    {
+        Transfer storage t = transfers[id];
+        require(t.state == TransferState.Pending, "Not pending");
+        t.state = TransferState.Canceled;
+
+        emit TransferCanceled(id, t.payer, block.timestamp);
+    }
+
+    /**
+     * @dev Get all transfers created by a payer
+     */
+    function getTransfersByPayer(address payer)
+        external
+        view
+        returns (uint256[] memory)
+    {
+        return transfersByPayer[payer];
+    }
+
+    /**
+     * @dev Get all transfers assigned to a payee
+     */
+    function getTransfersByPayee(address payee)
+        external
+        view
+        returns (uint256[] memory)
+    {
+        return transfersByPayee[payee];
+    }
+
+    /**
+     * @dev Get contract ETH balance
+     */
+    function getContractBalance() external view returns (uint256) {
+        return address(this).balance;
+    }
+
+    /**
+     * @dev Transfer contract ownership
+     */
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Zero address");
+        address prev = owner;
+        owner = newOwner;
+        emit OwnershipTransferred(prev, newOwner);
     }
 }
-// 
-End
-// 
